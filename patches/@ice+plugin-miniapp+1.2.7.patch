@@ -1,0 +1,135 @@
+diff --git a/node_modules/@ice/plugin-miniapp/esm/index.js b/node_modules/@ice/plugin-miniapp/esm/index.js
+index 4edd159..aebea59 100644
+--- a/node_modules/@ice/plugin-miniapp/esm/index.js
++++ b/node_modules/@ice/plugin-miniapp/esm/index.js
+@@ -9,7 +9,7 @@ const { name: PLUGIN_NAME } = packageJSON;
+ const plugin = (miniappOptions = {}) => ({
+     name: PLUGIN_NAME,
+     setup: ({ registerTask, onHook, context, generator, modifyUserConfig }) => {
+-        const { nativeConfig = {} } = miniappOptions;
++        const { nativeConfig = {}, templateRegistration = {} } = miniappOptions;
+         const { commandArgs, rootDir, command } = context;
+         const { target } = commandArgs;
+         if (MINIAPP_TARGETS.includes(target)) {
+@@ -62,6 +62,7 @@ const plugin = (miniappOptions = {}) => ({
+                 configAPI,
+                 runtimeDir: '.ice',
+                 nativeConfig,
++                templateRegistration,
+             }));
+             onHook(`after.${command}.compile`, async ({ isSuccessful, isFirstCompile }) => {
+                 const shouldShowLog = isSuccessful && ((command === 'start' && isFirstCompile) || command === 'build');
+diff --git a/node_modules/@ice/plugin-miniapp/esm/miniapp/index.js b/node_modules/@ice/plugin-miniapp/esm/miniapp/index.js
+index 0f6020a..51adadd 100644
+--- a/node_modules/@ice/plugin-miniapp/esm/miniapp/index.js
++++ b/node_modules/@ice/plugin-miniapp/esm/miniapp/index.js
+@@ -26,7 +26,7 @@ function getEntry(rootDir, runtimeDir) {
+         main: entryFile,
+     };
+ }
+-const getMiniappTask = ({ rootDir, command, target, configAPI, runtimeDir, nativeConfig }) => {
++const getMiniappTask = ({ rootDir, command, target, configAPI, runtimeDir, nativeConfig, templateRegistration, }) => {
+     const entry = getEntry(rootDir, runtimeDir);
+     const mode = command === 'start' ? 'development' : 'production';
+     const { template, globalObject, fileType, projectConfigJson, modifyBuildAssets, components } = getMiniappTargetConfig(target);
+@@ -38,6 +38,7 @@ const getMiniappTask = ({ rootDir, command, target, configAPI, runtimeDir, nativ
+         projectConfigJson,
+         nativeConfig,
+         modifyBuildAssets,
++        templateRegistration,
+     });
+     const isPublicDirExist = fs.existsSync(path.join(rootDir, 'public'));
+     const defaultLogging = command === 'start' ? 'summary' : 'summary assets';
+@@ -127,6 +128,7 @@ const getMiniappTask = ({ rootDir, command, target, configAPI, runtimeDir, nativ
+         cssExtensionAlias: ['.qss', '.jxss', '.wxss', '.acss', '.ttss'],
+         enableRpx2Vw: false,
+         logging: process.env.WEBPACK_LOGGING || defaultLogging,
++        templateRegistration,
+     };
+ };
+ export default getMiniappTask;
+diff --git a/node_modules/@ice/plugin-miniapp/esm/miniapp/webpack/combination.js b/node_modules/@ice/plugin-miniapp/esm/miniapp/webpack/combination.js
+index 1d94e40..32532e9 100644
+--- a/node_modules/@ice/plugin-miniapp/esm/miniapp/webpack/combination.js
++++ b/node_modules/@ice/plugin-miniapp/esm/miniapp/webpack/combination.js
+@@ -15,6 +15,7 @@ export class MiniCombination {
+             fileType: rawConfig.fileType,
+             env: rawConfig.env,
+             template: rawConfig.template,
++            templateRegistration: rawConfig.templateRegistration,
+             modifyBuildAssets: rawConfig.modifyBuildAssets,
+             // the follow value is writing for type check, do not make any sense.
+             isBuildPlugin: false,
+diff --git a/node_modules/@ice/plugin-miniapp/esm/miniapp/webpack/plugins/MiniPlugin.js b/node_modules/@ice/plugin-miniapp/esm/miniapp/webpack/plugins/MiniPlugin.js
+index ec8159c..577f7ed 100644
+--- a/node_modules/@ice/plugin-miniapp/esm/miniapp/webpack/plugins/MiniPlugin.js
++++ b/node_modules/@ice/plugin-miniapp/esm/miniapp/webpack/plugins/MiniPlugin.js
+@@ -61,6 +61,7 @@ export default class MiniPlugin {
+             pxTransformConfig: options.pxTransformConfig,
+             hot: options.hot,
+             loaderMeta: options.loaderMeta || {},
++            templateRegistration: miniBuildConfig.templateRegistration || {},
+         };
+         if (template.isSupportRecursive === false && baseLevel > 0) {
+             template.baseLevel = baseLevel;
+@@ -1092,6 +1093,9 @@ export default class MiniPlugin {
+         const { RawSource } = compiler.webpack.sources;
+         let templStr = templateFn(...options);
+         const fileTemplName = this.getTemplatePath(this.getComponentName(filePath));
++        if (this.isBaseTemplate(fileTemplName)) {
++            templStr = this.applyTemplateRegistration(templStr);
++        }
+         if ((_a = this.options.combination.config.minifyXML) === null || _a === void 0 ? void 0 : _a.collapseWhitespace) {
+             const { minify } = require('html-minifier');
+             templStr = minify(templStr, {
+@@ -1101,6 +1105,50 @@ export default class MiniPlugin {
+         }
+         compilation.assets[fileTemplName] = new RawSource(templStr);
+     }
++    isBaseTemplate(fileTemplName) {
++        const templExt = this.options.fileType.templ;
++        return new RegExp(`(^|/)base\\${templExt}$`).test(fileTemplName);
++    }
++    normalizeTemplateComponentName(name = '') {
++        return String(name).replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
++    }
++    normalizeTemplatePropName(name = '') {
++        return String(name).toLowerCase().replace(/[^a-z0-9]/g, '');
++    }
++    escapeRegExp(value = '') {
++        return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++    }
++    applyTemplateRegistration(templStr) {
++        const { templateRegistration = {} } = this.options;
++        const excludedComponents = (templateRegistration.excludeComponents || []).map((name) => this.normalizeTemplateComponentName(name));
++        const componentProps = templateRegistration.componentProps || {};
++        let nextTemplate = templStr;
++        excludedComponents.forEach((componentName) => {
++            const tag = this.escapeRegExp(componentName);
++            nextTemplate = nextTemplate.replace(new RegExp(`<${tag}(\\s[^>]*)?>[\\s\\S]*?<\\/${tag}>`, 'gi'), '<block></block>');
++            nextTemplate = nextTemplate.replace(new RegExp(`<${tag}(\\s[^>]*)?\\/>`, 'gi'), '<block></block>');
++        });
++        Object.entries(componentProps).forEach(([componentName, rule]) => {
++            const excludes = (rule === null || rule === void 0 ? void 0 : rule.exclude) || [];
++            if (!excludes.length)
++                return;
++            const normalizedName = this.normalizeTemplateComponentName(componentName);
++            const tag = this.escapeRegExp(normalizedName);
++            const excludeSet = new Set(excludes.map((propName) => this.normalizeTemplatePropName(propName)));
++            nextTemplate = nextTemplate.replace(new RegExp(`<${tag}\\b([^>]*)>`, 'gi'), (_full, attrs) => {
++                let nextAttrs = attrs || '';
++                nextAttrs = nextAttrs.replace(/\s([:@\w-]+)="[^"]*"/gi, (attrFull, attrName) => {
++                    const normalizedAttrName = this.normalizeTemplatePropName(attrName);
++                    if (excludeSet.has(normalizedAttrName)) {
++                        return '';
++                    }
++                    return attrFull;
++                });
++                return `<${normalizedName}${nextAttrs}>`;
++            });
++        });
++        return nextTemplate;
++    }
+     generateXSFile(compilation, compiler, xsPath) {
+         const { RawSource } = compiler.webpack.sources;
+         const ext = this.options.fileType.xs;
